@@ -817,7 +817,7 @@ async def test_supplier(cfg, bot: FakeBot, svc: OrderService) -> None:
     check("заказ создан", created)
     check(
         "поставщику ушло уведомление одной строкой",
-        bot.to(SUPPLIER) == ["Заказ № %s от @petr" % order["code"]],
+        bot.to(SUPPLIER) == ["Заказ № %s (%d) от @petr" % (order["code"], order["day_no"])],
         str(bot.to(SUPPLIER)),
     )
     check("продавцу ушла полная карточка", any("Новый заказ" in t for t in bot.to(SELLER)))
@@ -889,7 +889,7 @@ async def test_supplier(cfg, bot: FakeBot, svc: OrderService) -> None:
     check(
         "продавец-поставщик получает и карточку, и строку поставщика",
         any("Новый заказ" in t for t in to_seller)
-        and ("Заказ № %s от @ivan" % order2["code"]) in to_seller,
+        and ("Заказ № %s (%d) от @ivan" % (order2["code"], order2["day_no"])) in to_seller,
         str(to_seller),
     )
 
@@ -1044,6 +1044,10 @@ async def test_migration(tmp: str) -> None:
         );
         INSERT INTO orders (code, user_id, status, price_rub, payment_mode, created_at, updated_at)
         VALUES ('NP-0001', 1, 'done', 3000, 'manual', '2026-10-01T00:00:00+00:00', '2026-10-01T00:00:00+00:00');
+        -- 23:59:59 по Новосибирску 1 октября и полночь 2 октября.
+        INSERT INTO orders (code, user_id, status, price_rub, payment_mode, created_at, updated_at)
+        VALUES ('NP-0002', 1, 'done', 3000, 'manual', '2026-10-01T16:59:59+00:00', '2026-10-01T16:59:59+00:00'),
+               ('NP-0003', 1, 'done', 3000, 'manual', '2026-10-01T17:00:00+00:00', '2026-10-01T17:00:00+00:00');
         CREATE TABLE events (
             id INTEGER PRIMARY KEY AUTOINCREMENT, order_id INTEGER REFERENCES orders(id) ON DELETE CASCADE,
             actor TEXT NOT NULL, type TEXT NOT NULL, detail TEXT, created_at TEXT NOT NULL
@@ -1066,6 +1070,8 @@ async def test_migration(tmp: str) -> None:
     check("в заказы — колонки промокода", {"promo_id", "promo_code", "promo_discount"} <= columns)
     check("у старого заказа промокода нет", order["promo_id"] is None and order["promo_discount"] == 0)
     check("старая история заказа на месте", len(await db.list_events(1)) == 1)
+    numbers = [(await db.get_order(i))["day_no"] for i in (1, 2, 3)]
+    check("старым заказам проставлен номер за сутки по Новосибирску", numbers == [1, 2, 1], str(numbers))
     promo = await db.create_promocode(
         "OLD-BASE", {"kind": "percent", "value": 10, "starts_on": None, "ends_on": None, "max_uses": None,
                      "per_user": 1, "enabled": 1, "note": None}, "seller:1", "скидка 10%")
@@ -1143,6 +1149,56 @@ async def test_test_orders(cfg) -> None:
         check("точка на вкладке продавца не горит из-за тестовых", (await res.json())["sellerUnread"] == 0)
     finally:
         await client.close()
+
+
+async def test_day_numbers(cfg) -> None:
+    """Номер заказа за сутки по Новосибирску: продавцу и поставщику «NP-0155 (4)»."""
+    print("\nНомер заказа за сутки")
+    tester = 445
+    cfg = replace(cfg, test_ids=(tester,))
+    bot = FakeBot()
+    svc = OrderService(bot, cfg)
+    for uid in (701, 702, 703, 704, 705, tester):
+        await db.upsert_user(uid, "u%d" % uid, "Покупатель")
+
+    real_now = db.now
+    try:
+        # 23:30 по Новосибирску 1 ноября — в UTC это ещё 16:30 того же дня.
+        db.now = lambda: "2026-11-01T16:30:00+00:00"
+        first, _ = await svc.get_or_create_order(701)
+        second, _ = await svc.get_or_create_order(702)
+        test, _ = await svc.get_or_create_order(tester)
+        check("первый заказ за сутки — (1), второй — (2)",
+              (first["day_no"], second["day_no"]) == (1, 2), str((first["day_no"], second["day_no"])))
+        check("у тестовых заказов свой счёт", test["day_no"] == 1, str(test["day_no"]))
+
+        # 00:05 по Новосибирску 2 ноября, хотя по UTC всё ещё 1 ноября.
+        db.now = lambda: "2026-11-01T17:05:00+00:00"
+        third, _ = await svc.get_or_create_order(703)
+        fourth, _ = await svc.get_or_create_order(704)
+        check("в полночь по Новосибирску счёт начинается заново",
+              (third["day_no"], fourth["day_no"]) == (1, 2), str((third["day_no"], fourth["day_no"])))
+        await db.delete_order(third["id"], "seller:%d" % SELLER)
+        fifth, _ = await svc.get_or_create_order(705)
+        check("после удаления заказа из середины дня номер не повторяется", fifth["day_no"] == 3,
+              str(fifth["day_no"]))
+    finally:
+        db.now = real_now
+
+    full = await svc._with_user(second)
+    card = texts.seller_order_card(full)
+    check("в карточке продавца — номер за сутки",
+          ("<b>Заказ %s (2)</b>" % second["code"]) in card, card[:120])
+    check("в уведомлении о новом заказе тоже",
+          any(("Заказ %s (2)" % second["code"]) in t and "Новый заказ" in t for t in bot.to(SELLER)))
+    check("поставщику — «Заказ № … (2) от …»",
+          ("Заказ № %s (2) от @u702" % second["code"]) in bot.to(SUPPLIER), str(bot.to(SUPPLIER))[:200])
+    check("в переписке и подписи к чеку — тоже",
+          ("%s (2)" % second["code"]) in texts.chat_from_buyer(full, "Вопрос")
+          and ("%s (2)" % second["code"]) in texts.receipt_caption(full, "Чек", "чек.pdf"))
+    buyer_texts = texts.buyer_order_card(second) + "".join(bot.to(702))
+    check("покупатель номер за сутки не видит", ("%s (" % second["code"]) not in buyer_texts, buyer_texts[:200])
+    check("без номера за сутки — просто номер заказа", texts.staff_code({"code": "NP-0001"}) == "NP-0001")
 
 
 async def test_promo(cfg) -> None:
@@ -2311,6 +2367,9 @@ async def main() -> int:
     await db.close()
     await db.init(os.path.join(tmp, "testers.sqlite3"))
     await test_test_orders(cfg)
+    await db.close()
+    await db.init(os.path.join(tmp, "day_numbers.sqlite3"))
+    await test_day_numbers(cfg)
     await db.close()
     await db.init(os.path.join(tmp, "promo.sqlite3"))
     await test_promo(cfg)

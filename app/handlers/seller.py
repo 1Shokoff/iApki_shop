@@ -146,7 +146,7 @@ async def cmd_note(message: Message, command: CommandObject) -> None:
         await message.answer("Заказ не найден.")
         return
     await db.set_note(order["id"], parts[1])
-    await message.answer("Заметка сохранена для %s." % texts.e(order["code"]))
+    await message.answer("Заметка сохранена для %s." % texts.e(texts.staff_code(order)))
 
 
 @router.message(Command("log"))
@@ -157,7 +157,7 @@ async def cmd_log(message: Message, command: CommandObject) -> None:
         await message.answer("Использование: /log NP-0001")
         return
     events = await db.list_events(order["id"], limit=20)
-    lines = ["<b>История %s</b>" % texts.e(order["code"])]
+    lines = ["<b>История %s</b>" % texts.e(texts.staff_code(order))]
     for ev in reversed(events):
         lines.append(
             "%s · %s · %s"
@@ -195,7 +195,7 @@ async def cmd_reply(message: Message, command: CommandObject, service: OrderServ
     except ServiceError as exc:
         await message.answer(texts.e(str(exc)))
         return
-    await message.answer("Отправлено покупателю по заказу %s." % texts.e(order["code"]))
+    await message.answer("Отправлено покупателю по заказу %s." % texts.e(texts.staff_code(order)))
 
 
 @router.message(Command("sellerhelp"))
@@ -408,6 +408,6 @@ async def take_reply(message: Message, state: FSMContext, service: OrderService)
     await state.clear()
     order = await db.get_order(order_id)
     await message.answer(
-        "Отправлено покупателю по заказу %s." % texts.e(order["code"] if order else ""),
+        "Отправлено покупателю по заказу %s." % texts.e(texts.staff_code(order) if order else ""),
         reply_markup=keyboards.seller_chat_kb(order_id),
     )

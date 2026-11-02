@@ -218,6 +218,16 @@ def test_mark(order: dict) -> str:
     return TEST_MARK + "\n" if order.get("is_test") else ""
 
 
+def staff_code(order: dict) -> str:
+    """Номер заказа для продавца и поставщика: «NP-0155 (4)» — четвёртый за сутки.
+
+    Покупателю номер за сутки не показываем: по нему видно, сколько у магазина
+    заказов. Обычный текст, без HTML.
+    """
+    day_no = order.get("day_no")
+    return "%s (%d)" % (order["code"], day_no) if day_no else order["code"]
+
+
 def list_label(order: dict, tail: str) -> str:
     """Подпись кнопки в списке заказов: номер, покупатель и хвост (статус или время)."""
     return "%s%s · %s · %s" % ("🧪 " if order.get("is_test") else "", order["code"], buyer_label(order), tail)
@@ -297,7 +307,7 @@ def buyer_order_card(order: dict) -> str:
 
 def seller_order_card(order: dict) -> str:
     lines = [
-        "<b>Заказ %s</b> · %s" % (e(order["code"]), e(const.TITLES.get(order["status"], "—"))),
+        "<b>Заказ %s</b> · %s" % (e(staff_code(order)), e(const.TITLES.get(order["status"], "—"))),
         "Покупатель: %s" % user_line(order),
         "Товар: %s" % e(catalog.product_name(order.get("app_slug"))),
         "Сумма: %s · оплата: %s" % (money(order["price_rub"]), e(order["payment_mode"])),
@@ -318,13 +328,13 @@ def seller_order_card(order: dict) -> str:
 
 def supplier_new_order(order: dict) -> str:
     """Уведомление поставщику о новом заказе — одной строкой."""
-    return "Заказ № %s от %s" % (e(order["code"]), user_ref(order))
+    return "Заказ № %s от %s" % (e(staff_code(order)), user_ref(order))
 
 
 def supplier_order_card(order: dict) -> str:
     """Карточка поставщика: номер, покупатель, время создания и UDID — больше ему незачем."""
     lines = [
-        "<b>Заказ № %s</b>" % e(order["code"]),
+        "<b>Заказ № %s</b>" % e(staff_code(order)),
         "Статус: <b>%s</b>" % e(const.TITLES.get(order["status"], order["status"])),
         "Покупатель: %s" % user_ref(order),
         "Создан: %s" % when(order["created_at"]),
@@ -529,7 +539,7 @@ def receipt_caption(order: dict, header: str, title: str) -> str:
              if order.get("promo_code") else "")
     return "%s\n\n<b>Заказ %s</b> · %s\nПокупатель: %s\nСумма: %s%s\nЧек: %s" % (
         header,
-        e(order["code"]),
+        e(staff_code(order)),
         e(const.TITLES.get(order["status"], "—")),
         user_line(order),
         money(order["price_rub"]),
@@ -540,7 +550,7 @@ def receipt_caption(order: dict, header: str, title: str) -> str:
 
 def receipt_part_caption(order: dict, index: int, total: int, title: str) -> str:
     """Подпись к одному из нескольких файлов чека: карточка с кнопками придёт следом."""
-    return "🧾 Чек к заказу %s · файл %d из %d\n%s" % (e(order["code"]), index, total, e(title[:200]))
+    return "🧾 Чек к заказу %s · файл %d из %d\n%s" % (e(staff_code(order)), index, total, e(title[:200]))
 
 
 def receipt_summary(order: dict, header: str, count: int) -> str:
@@ -677,7 +687,7 @@ def about(cfg: Config) -> str:
 
 def chat_from_buyer(order: dict, body: str) -> str:
     return "💬 <b>Сообщение по заказу %s</b>\nОт: %s\n\n%s" % (
-        e(order["code"]),
+        e(staff_code(order)),
         user_line(order),
         e(body),
     )
@@ -688,9 +698,10 @@ def chat_from_seller(order: dict, body: str) -> str:
 
 
 def chat_history(order: dict, messages: list[dict]) -> str:
+    """Переписка по заказу — её открывает продавец (/chat, «💬 Ответить»)."""
     if not messages:
-        return "По заказу <b>%s</b> переписки ещё нет." % e(order["code"])
-    lines = ["<b>Переписка по заказу %s</b>" % e(order["code"]), ""]
+        return "По заказу <b>%s</b> переписки ещё нет." % e(staff_code(order))
+    lines = ["<b>Переписка по заказу %s</b>" % e(staff_code(order)), ""]
     for msg in messages:
         who = "Продавец" if msg["author"] == "seller" else "Покупатель"
         lines.append(

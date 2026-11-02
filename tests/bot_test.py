@@ -294,7 +294,7 @@ async def main() -> int:
     check("продавцу пришло уведомление", any("Новый заказ" in t for t in bot.texts_to(SELLER)))
     check(
         "поставщику пришло уведомление одной строкой",
-        bot.texts_to(SUPPLIER) == ["Заказ № %s от @user%d" % (order["code"], BUYER)],
+        bot.texts_to(SUPPLIER) == ["Заказ № %s (%d) от @user%d" % (order["code"], order["day_no"], BUYER)],
         str(bot.texts_to(SUPPLIER)),
     )
     check(

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, time, timedelta, timezone
 from typing import Any, Iterable
 
 import aiosqlite
@@ -49,7 +49,10 @@ CREATE TABLE IF NOT EXISTS orders (
     -- снят, а код и скидка остаются для истории.
     promo_id       INTEGER REFERENCES promo_codes(id) ON DELETE SET NULL,
     promo_code     TEXT,
-    promo_discount INTEGER NOT NULL DEFAULT 0
+    promo_discount INTEGER NOT NULL DEFAULT 0,
+    -- Номер заказа за сутки по const.ORDER_DAY_TZ — продавцу «NP-0155 (4)».
+    -- Ставится при создании и не меняется; у тестовых заказов свой счёт.
+    day_no         INTEGER
 );
 
 CREATE INDEX IF NOT EXISTS idx_orders_user   ON orders(user_id);
@@ -148,6 +151,21 @@ def now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _order_day(ts: str) -> tuple[str, str]:
+    """Сутки по const.ORDER_DAY_TZ, в которые попал момент ts, — границами в UTC, как в базе."""
+    local = datetime.fromisoformat(ts).astimezone(const.ORDER_DAY_TZ)
+    start = datetime.combine(local.date(), time(0, 0), tzinfo=const.ORDER_DAY_TZ)
+    end = start + timedelta(days=1)
+    return (
+        start.astimezone(timezone.utc).isoformat(timespec="seconds"),
+        end.astimezone(timezone.utc).isoformat(timespec="seconds"),
+    )
+
+
+# Тот же сдвиг для SQLite: date(created_at, '+420 minutes') — дата по const.ORDER_DAY_TZ.
+_ORDER_DAY_SHIFT = "%+d minutes" % (const.ORDER_DAY_TZ.utcoffset(None) // timedelta(minutes=1))
+
+
 def conn() -> aiosqlite.Connection:
     if _conn is None:
         raise RuntimeError("База не инициализирована: вызовите db.init()")
@@ -190,6 +208,24 @@ async def _migrate() -> None:
     if "is_test" not in columns:
         await conn().execute("ALTER TABLE orders ADD COLUMN is_test INTEGER NOT NULL DEFAULT 0")
         log.info("Миграция: добавлена колонка orders.is_test")
+    if "day_no" not in columns:
+        await conn().execute("ALTER TABLE orders ADD COLUMN day_no INTEGER")
+        # Прежним заказам — номер по порядку внутри своих суток, как у новых.
+        await conn().execute(
+            """
+            UPDATE orders SET day_no = (
+                SELECT n FROM (
+                    SELECT id, ROW_NUMBER() OVER (
+                        PARTITION BY is_test, date(created_at, ?) ORDER BY id
+                    ) AS n
+                    FROM orders
+                ) AS ranked
+                WHERE ranked.id = orders.id
+            )
+            """,
+            (_ORDER_DAY_SHIFT,),
+        )
+        log.info("Миграция: добавлена колонка orders.day_no")
     promo_columns = (
         ("promo_id", "INTEGER REFERENCES promo_codes(id) ON DELETE SET NULL"),
         ("promo_code", "TEXT"),
@@ -273,12 +309,20 @@ async def create_order(
     is_test: bool = False,
 ) -> dict:
     ts = now()
+    day_start, day_end = _order_day(ts)
+    # Номер за сутки — следующий после наибольшего, а не число заказов: если
+    # продавец удалит заказ из середины дня, номера не повторятся.
     cur = await conn().execute(
         """
-        INSERT INTO orders (code, user_id, status, price_rub, payment_mode, app_slug, is_test, created_at, updated_at)
-        VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO orders (code, user_id, status, price_rub, payment_mode, app_slug, is_test,
+                            created_at, updated_at, day_no)
+        VALUES ('', ?, ?, ?, ?, ?, ?, ?, ?, (
+            SELECT COALESCE(MAX(day_no), 0) + 1 FROM orders
+            WHERE is_test = ? AND created_at >= ? AND created_at < ?
+        ))
         """,
-        (user_id, const.NEW, price_rub, payment_mode, app_slug, int(is_test), ts, ts),
+        (user_id, const.NEW, price_rub, payment_mode, app_slug, int(is_test), ts, ts,
+         int(is_test), day_start, day_end),
     )
     order_id = int(cur.lastrowid)
     code = "%s-%04d" % (prefix, order_id)
