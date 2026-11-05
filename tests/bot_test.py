@@ -7,10 +7,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import sys
 import tempfile
 from dataclasses import replace
 from datetime import datetime, timezone
+from pathlib import Path
 
 TOKEN = "123456:TESTTOKENTESTTOKENTESTTOKENTESTTOKEN"
 BUYER = 777
@@ -47,6 +49,7 @@ from aiogram.enums import ParseMode  # noqa: E402
 from aiogram.exceptions import TelegramBadRequest  # noqa: E402
 from aiogram.methods import (  # noqa: E402
     AnswerCallbackQuery,
+    AnswerPreCheckoutQuery,
     EditMessageText,
     SendDocument,
     SendMessage,
@@ -60,15 +63,18 @@ from aiogram.types import (  # noqa: E402
     FSInputFile,
     Message,
     PhotoSize,
+    PreCheckoutQuery,
     Update,
     User,
     Video,
 )
 
-from app import const, db, promocodes  # noqa: E402
+from app import const, db, maintenance, promocodes  # noqa: E402
 from app.config import load_config  # noqa: E402
 from app.main import build_dispatcher  # noqa: E402
 from app.service import OrderService  # noqa: E402
+
+ROOT = Path(__file__).resolve().parent.parent
 
 failures: list[str] = []
 counter = {"id": 0}
@@ -224,6 +230,70 @@ def callback_update(chat_id: int, data: str) -> Update:
             message=make_message(chat_id, "предыдущее сообщение"),
         ),
     )
+
+
+async def test_maintenance(bot: StubBot) -> None:
+    """Заглушка на время техработ и страница, которую в это время отдаёт Caddy."""
+    print("\nТехнические работы")
+    dp = maintenance.build_dispatcher()
+    check("заглушка слушает сообщения, кнопки и оплату звёздами",
+          {"message", "callback_query", "pre_checkout_query"} <= set(dp.resolve_used_update_types()))
+
+    bot.reset()
+    await dp.feed_update(bot, message_update(BUYER, "/start"))
+    check("на сообщение — «Идут технические работы»",
+          any("Идут технические работы" in t for t in bot.texts_to(BUYER)), str(bot.texts_to(BUYER)))
+    check("и просьба прислать UDID и чек ещё раз", any("отправьте их ещё раз" in t for t in bot.texts_to(BUYER)))
+    bot.reset()
+    await dp.feed_update(bot, message_update(BUYER, "00008150-000914312E78C01C"))
+    check("второе сообщение подряд — без повторного ответа", bot.texts_to(BUYER) == [], str(bot.texts_to(BUYER)))
+    other = BUYER + 1
+    await dp.feed_update(bot, message_update(other, "Здравствуйте"))
+    check("другому покупателю отвечаем сразу", len(bot.texts_to(other)) == 1)
+
+    quick = maintenance.build_dispatcher(repeat_after=0)
+    bot.reset()
+    await quick.feed_update(bot, message_update(BUYER, "ещё раз"))
+    check("через минуту отвечаем снова", len(bot.texts_to(BUYER)) == 1)
+
+    bot.reset()
+    await dp.feed_update(bot, callback_update(BUYER, "o:pay:1"))
+    answers = [m for m in bot.calls if isinstance(m, AnswerCallbackQuery)]
+    check("кнопка — всплывающее окно о техработах",
+          len(answers) == 1 and answers[0].show_alert and "технические работы" in answers[0].text, str(answers))
+    check("и больше ничего", len(bot.calls) == 1, str(bot.calls))
+
+    bot.reset()
+    counter["id"] += 1
+    await dp.feed_update(bot, Update(update_id=counter["id"], pre_checkout_query=PreCheckoutQuery(
+        id="pc1", from_user=User(id=BUYER, is_bot=False, first_name="Тест"),
+        currency="XTR", total_amount=100, invoice_payload="1",
+    )))
+    checkout = [m for m in bot.calls if isinstance(m, AnswerPreCheckoutQuery)]
+    check("оплату звёздами заглушка отклоняет", len(checkout) == 1 and checkout[0].ok is False, str(checkout))
+
+    bot.reset()
+    counter["id"] += 1
+    group = Message(
+        message_id=counter["id"], date=datetime.now(timezone.utc),
+        chat=Chat(id=-100500, type="group"),
+        from_user=User(id=4242, is_bot=False, first_name="Гость"), text="Привет всем",
+    )
+    counter["id"] += 1
+    await dp.feed_update(bot, Update(update_id=counter["id"], message=group))
+    check("в группе заглушка молчит", bot.calls == [], str(bot.calls))
+
+    page = (ROOT / "maintenance" / "index.html").read_text(encoding="utf-8")
+    check("страница техработ на месте", "Идут технические работы" in page)
+    check("и ничего не грузит с сервера — бот в это время не работает",
+          not re.search(r"""(?:src|href)\s*=\s*["'](?!#)""", page), re.findall(r"(?:src|href)=\S+", page)[:5])
+    caddy = (ROOT / "Caddyfile").read_text(encoding="utf-8")
+    check("Caddy показывает её по флагу maintenance/on", "try_files /on" in caddy and "/srv/maintenance" in caddy)
+    check("уведомления Platega во время техработ идут к боту", "not path /api/platega/*" in caddy)
+    compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
+    check("папка со страницей смонтирована в Caddy", "./maintenance:/srv/maintenance:ro" in compose)
+    check("заглушка сама не стартует — только в профиле maintenance",
+          'profiles: ["maintenance"]' in compose and "app.maintenance" in compose)
 
 
 async def main() -> int:
@@ -648,6 +718,8 @@ async def main() -> int:
     finally:
         dp["cfg"], dp["service"] = cfg, service
         await pserver.close()
+
+    await test_maintenance(bot)
 
     await db.close()
     await bot.session.close()

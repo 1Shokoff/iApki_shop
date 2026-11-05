@@ -35,6 +35,22 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Заглушка на время техработ: на любое сообщение отвечает, что идут
+  # технические работы. Её запускает ./maintenance.sh on вместо бота — обычный
+  # docker compose up её не трогает (профиль maintenance). Рядом с ботом её
+  # не запускать: Telegram отдаёт апдейты только одному получателю.
+  maintenance:
+    image: apps-bot:latest
+    profiles: ["maintenance"]
+    restart: unless-stopped
+    env_file: .env
+    command: ["python", "-m", "app.maintenance"]
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped
@@ -48,6 +64,9 @@ services:
       ACME_EMAIL: ${ACME_EMAIL:-}
     volumes:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Страница техработ и флаг maintenance/on — папкой, а не файлом:
+      # флаг появляется и пропадает, а смонтированная папка видит это сразу.
+      - ./maintenance:/srv/maintenance:ro
       - caddy_data:/data
       - caddy_config:/config
     logging:

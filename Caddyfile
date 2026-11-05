@@ -26,7 +26,45 @@
 	@assets path /static/*
 	header @assets Cache-Control "public, max-age=300"
 
-	reverse_proxy bot:8080 {
-		header_up X-Real-IP {remote_host}
+	# Техработы вручную: ./maintenance.sh on кладёт файл maintenance/on, и пока
+	# он есть, всем показываем страницу техработ. Уведомления Platega и /health
+	# идут к боту всегда: оплату, пришедшую во время работ, бот подтвердит сам.
+	@maintenance {
+		file {
+			root /srv/maintenance
+			try_files /on
+		}
+		not path /api/platega/* /health
+	}
+	handle @maintenance {
+		error 503
+	}
+
+	handle {
+		reverse_proxy bot:8080 {
+			header_up X-Real-IP {remote_host}
+		}
+	}
+
+	# Бот не отвечает: остановлен на техработы, перезапускается при выкатке или
+	# упал. Вместо голой ошибки — страница техработ, а запросам Mini App к /api —
+	# JSON: уже открытое приложение покажет текст из поля error.
+	handle_errors 502 503 504 {
+		header Cache-Control "no-store"
+		header Retry-After "60"
+
+		@api path /api/*
+		handle @api {
+			header Content-Type "application/json; charset=utf-8"
+			respond `{"error": "Идут технические работы. Попробуйте через несколько минут.", "maintenance": true}` 503
+		}
+
+		handle {
+			root * /srv/maintenance
+			rewrite * /index.html
+			file_server {
+				status 503
+			}
+		}
 	}
 }
