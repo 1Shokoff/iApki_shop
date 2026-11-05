@@ -38,7 +38,10 @@ Runner = Callable[[list[str]], str]
 def sftp_runner(host: str, key: Path) -> Runner:
     def run(commands: list[str]) -> str:
         result = subprocess.run(
-            ["sftp", "-q", "-i", str(key), "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-b", "-", host],
+            # Только ключ из файла, без SSH-агента: агент Bitwarden спрашивал бы
+            # подтверждение на каждый запуск, а Планировщик ответить не может.
+            ["sftp", "-q", "-i", str(key), "-o", "IdentitiesOnly=yes", "-o", "IdentityAgent=none",
+             "-o", "BatchMode=yes", "-o", "ConnectTimeout=20", "-b", "-", host],
             input="\n".join(commands) + "\n",
             capture_output=True,
             text=True,
