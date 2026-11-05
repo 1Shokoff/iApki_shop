@@ -70,6 +70,8 @@ from app.api import build_app, order_public  # noqa: E402
 from app.config import MSK, load_config, today_msk  # noqa: E402
 from app.service import OrderService, Receipt, ServiceError  # noqa: E402
 
+ROOT = pathlib.Path(__file__).resolve().parent.parent
+
 SPACED_UDID = "2b6f0cc904d137be2e17 30235f5664094b831186"
 # Новый формат (iPhone XS и новее): 25 символов с дефисом, буквы заглавные.
 MODERN_UDID = "00008150-000914312E78C01C"
@@ -1082,6 +1084,160 @@ async def test_migration(tmp: str) -> None:
     await db.init(path)
     check("повторный запуск миграции не падает", True)
     await db.close()
+
+
+def test_backup(tmp: str) -> None:
+    """Копии базы: снимок с WAL, шифрование, правило хранения, восстановление, выгрузка на ПК."""
+    print("\nРезервные копии")
+    import importlib.util
+    import shutil
+    import sqlite3
+    from app import backup
+
+    folder = pathlib.Path(tmp) / "backup"
+    live = folder / "live" / "bot.sqlite3"
+    live.parent.mkdir(parents=True)
+    password = "correct-horse-battery-staple"
+
+    # Бот держит базу открытой в режиме WAL: свежие заказы ещё лежат в -wal.
+    writer = sqlite3.connect(live)
+    writer.execute("PRAGMA journal_mode=WAL")
+    writer.execute("PRAGMA wal_autocheckpoint=0")
+    writer.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY, code TEXT, device_udid TEXT)")
+    writer.commit()
+    writer.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    for i in range(1, 6):
+        writer.execute("INSERT INTO orders (code, device_udid) VALUES (?, ?)", ("NP-%04d" % i, MODERN_UDID))
+    writer.commit()
+    try:
+        raw = folder / "raw.sqlite3"
+        shutil.copy(live, raw)
+        conn = sqlite3.connect(raw)
+        lost = conn.execute("SELECT COUNT(*) FROM orders").fetchone()[0]
+        conn.close()
+        check("простое копирование файла теряет заказы из WAL — поэтому снимок", lost == 0, str(lost))
+
+        catalog = folder / "catalog.toml"
+        catalog.write_text("[sber]\nname = \"СберБанк\"\n", encoding="utf-8")
+        moment = datetime(2026, 11, 6, 21, 17, 5, tzinfo=timezone.utc)
+        target, orders, removed = backup.create(live, folder / "out", catalog, password, now=moment)
+        check("снимок при открытом боте — со всеми заказами", orders == 5, str(orders))
+        check("имя копии — время по Новосибирску",
+              target.name == "iapki-2026-11-07_04-17-05.tar.gz.enc", target.name)
+        check("ничего не удалено", removed == [])
+    finally:
+        writer.close()
+
+    blob = target.read_bytes()
+    check("в копии не видно ни UDID, ни SQLite", MODERN_UDID.encode() not in blob and b"SQLite format" not in blob)
+    try:
+        backup.decrypt(blob, "wrong-password-123")
+        check("чужой пароль не открывает копию", False)
+    except backup.BackupError as exc:
+        check("чужой пароль не открывает копию", "пароль" in str(exc), str(exc))
+    tampered = bytearray(blob)
+    tampered[-1] ^= 1
+    try:
+        backup.decrypt(bytes(tampered), password)
+        check("подменённый байт замечен", False)
+    except backup.BackupError:
+        check("подменённый байт замечен", True)
+
+    opened = backup.decrypt_to(target, folder / "opened", password)
+    names = sorted(p.name for p in opened)
+    check("расшифровка — база и catalog.toml", names == ["bot.sqlite3", "catalog.toml"], str(names))
+    conn = sqlite3.connect(folder / "opened" / "bot.sqlite3")
+    check("в расшифрованной базе все заказы и UDID",
+          conn.execute("SELECT COUNT(*) FROM orders WHERE device_udid = ?", (MODERN_UDID,)).fetchone()[0] == 5)
+    check("копия — один файл, без WAL", conn.execute("PRAGMA journal_mode").fetchone()[0] == "delete")
+    conn.close()
+    check("catalog.toml цел", (folder / "opened" / "catalog.toml").read_text(encoding="utf-8") == catalog.read_text(encoding="utf-8"))
+
+    try:
+        backup.create(folder / "nope.sqlite3", folder / "out", None, password)
+        check("без базы копия не делается", False)
+    except backup.BackupError:
+        check("без базы копия не делается, пустая база не создаётся", not (folder / "nope.sqlite3").exists())
+
+    old_password = os.environ.pop("BACKUP_PASSWORD", None)
+    try:
+        for value, title in (("", "без BACKUP_PASSWORD — понятная ошибка"), ("short", "короткий пароль не принимается")):
+            os.environ["BACKUP_PASSWORD"] = value
+            try:
+                backup._password()
+                check(title, False)
+            except backup.BackupError:
+                check(title, True)
+    finally:
+        os.environ.pop("BACKUP_PASSWORD", None)
+        if old_password is not None:
+            os.environ["BACKUP_PASSWORD"] = old_password
+
+    # Восстановление: прежняя база с хвостами WAL заменяется копией.
+    target_db = folder / "restore" / "bot.sqlite3"
+    target_db.parent.mkdir()
+    conn = sqlite3.connect(target_db)
+    conn.execute("CREATE TABLE orders (id INTEGER PRIMARY KEY)")
+    conn.commit()
+    conn.close()
+    for suffix in ("-wal", "-shm"):
+        pathlib.Path(str(target_db) + suffix).write_bytes(b"stale")
+    restored = backup.restore(target, target_db, password)
+    check("восстановлено столько заказов, сколько в копии", restored == 5, str(restored))
+    check("старые -wal и -shm убраны", not any(pathlib.Path(str(target_db) + s).exists() for s in ("-wal", "-shm")))
+    conn = sqlite3.connect(target_db)
+    check("в базе — данные из копии", conn.execute("SELECT code FROM orders ORDER BY id").fetchall()[-1][0] == "NP-0005")
+    conn.close()
+
+    # Правило хранения на полугоде копий каждые 6 часов.
+    now = datetime(2026, 11, 6, 12, 0, tzinfo=timezone.utc)
+    moments = [now - timedelta(hours=6 * i) for i in range(4 * 400)]
+    keep = backup.to_keep(moments, now)
+    recent = [m for m in moments if now - m <= timedelta(days=7)]
+    older = sorted(m for m in keep if now - m > timedelta(days=7))
+    check("все копии за 7 дней остаются", set(recent) <= keep, str(len(recent)))
+    check("старше недели — по одной на неделю и на месяц, не больше 4 + 6",
+          0 < len(older) <= backup.KEEP_WEEKS + backup.KEEP_MONTHS, str(len(older)))
+    check("самая старая — не старше полугода", now - min(keep) <= timedelta(days=186), str(now - min(keep)))
+    check("свежайшая копия всегда остаётся", max(moments) in keep)
+
+    shelf = folder / "shelf"
+    shelf.mkdir()
+    for m in moments[:200]:
+        (shelf / backup.backup_name(m)).write_bytes(b"x")
+    (shelf / "notes.txt").write_text("свои заметки", encoding="utf-8")
+    (shelf / ".iapki-2026-01-01_00-00-00.tar.gz.enc.part").write_bytes(b"x")
+    gone = backup.prune(shelf, now)
+    left = backup.backups_in(shelf)
+    check("лишние копии удалены", len(gone) == 200 - len(left) and set(left) == backup.to_keep(moments[:200], now))
+    check("чужие и недокачанные файлы не тронуты",
+          (shelf / "notes.txt").exists() and (shelf / ".iapki-2026-01-01_00-00-00.tar.gz.enc.part").exists())
+
+    # Выгрузка на ПК: вместо sftp — подделка с тем же языком команд.
+    spec = importlib.util.spec_from_file_location("pull_backups", ROOT / "tools" / "pull_backups.py")
+    pull_mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(pull_mod)
+    server = {backup.backup_name(m): b"copy" for m in moments[:12]}
+    calls = []
+
+    def fake_sftp(commands):
+        calls.append(commands)
+        if commands == ["ls -1"]:
+            return "sftp> ls -1\n" + "\n".join(list(server) + ["notes.txt"]) + "\n"
+        for command in commands:
+            _, name, local = re.match(r'(get) "([^"]+)" "([^"]+)"', command).groups()
+            pathlib.Path(local).write_bytes(server[name])
+        return ""
+
+    pc = folder / "pc"
+    got, _ = pull_mod.pull(fake_sftp, pc, now)
+    check("на ПК скачаны все копии с сервера", sorted(got) == sorted(server) and len(backup.backups_in(pc)) == 12)
+    check("чужие файлы с сервера не качаются, недокачанных не осталось",
+          not (pc / "notes.txt").exists() and not list(pc.glob("*.part")))
+    calls.clear()
+    server[backup.backup_name(now + timedelta(hours=6))] = b"new"
+    got, _ = pull_mod.pull(fake_sftp, pc, now + timedelta(hours=6))
+    check("в следующий раз — только новая", len(got) == 1 and len(calls[-1]) == 1, str(got))
 
 
 async def test_test_orders(cfg) -> None:
@@ -2392,6 +2548,7 @@ async def main() -> int:
     await test_promo_apply(cfg)
     await db.close()
     await test_migration(tmp)
+    test_backup(tmp)
 
     print("")
     if failures:

@@ -51,6 +51,23 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Резервные копии базы для ./backup.sh: запускается разово (docker compose run),
+  # сам не стартует — профиль tools. Работает под тем же пользователем, что и
+  # бот: файлы WAL, которые SQLite создаёт при чтении, не достанутся root.
+  backup:
+    image: apps-bot:latest
+    profiles: ["tools"]
+    env_file: .env
+    environment:
+      DB_PATH: /data/bot.sqlite3
+      IPA_DIR: /app/files
+      BACKUP_DIR: /backups
+    volumes:
+      - bot_data:/data
+      - ./files:/app/files:ro
+      - ./backups:/backups
+    entrypoint: ["python", "-m", "app.backup"]
+
   caddy:
     image: caddy:2-alpine
     restart: unless-stopped

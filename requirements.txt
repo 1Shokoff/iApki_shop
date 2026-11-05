@@ -4,3 +4,5 @@ aiosqlite>=0.20
 # Нужен, только когда задан TELEGRAM_PROXY: aiogram гоняет запросы к Telegram
 # через прокси именно этой библиотекой (socks5 и http).
 aiohttp-socks>=0.9
+# Шифрование резервных копий базы (app/backup.py): AES-256-GCM и scrypt.
+cryptography>=42

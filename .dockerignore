@@ -1,6 +1,9 @@
 .git
 .env
 data
+# Сборки .ipa и копии базы в образ не попадают — незачем гнать их в контекст сборки.
+files
+backups
 __pycache__
 *.pyc
 README.md

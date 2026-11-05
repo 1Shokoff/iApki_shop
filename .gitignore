@@ -6,3 +6,4 @@ __pycache__/
 tools/preview.sqlite3*
 files/
 maintenance/on
+backups/
