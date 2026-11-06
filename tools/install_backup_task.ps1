@@ -1,17 +1,22 @@
-﻿# Регистрирует в Планировщике Windows задачу «iApki — копии базы»: каждые 6 часов
+﻿# Регистрирует в Планировщике Windows задачу «iApki backup»: каждые 6 часов
 # и при входе в систему забирать копии базы с сервера (tools\pull_backups.py).
 #
 #   powershell -ExecutionPolicy Bypass -File tools\install_backup_task.ps1
 #   powershell -ExecutionPolicy Bypass -File tools\install_backup_task.ps1 -Dir "E:\Копии\iApki"
 #
 # Пропущенный запуск (ПК был выключен) выполнится, как только ПК включится.
-# Удалить задачу: Unregister-ScheduledTask -TaskName "iApki — копии базы"
+# Запустить сейчас: Start-ScheduledTask -TaskName "iApki backup"
+# Удалить задачу:   Unregister-ScheduledTask -TaskName "iApki backup"
 param(
     [string]$Dir = "D:\Backups\iApki"
 )
 
 $ErrorActionPreference = "Stop"
-$name = "iApki — копии базы"
+# Имя латиницей и без тире: его набирают руками, а «—» легко спутать с «-».
+$name = "iApki backup"
+# Прежнее имя задачи — убираем, чтобы копии не забирались дважды.
+Get-ScheduledTask -TaskName "iApki — копии базы" -ErrorAction SilentlyContinue |
+    Unregister-ScheduledTask -Confirm:$false
 $root = Split-Path -Parent $PSScriptRoot
 # pythonw — без окна консоли, которое мигало бы раз в 6 часов.
 $python = Join-Path $root ".venv\Scripts\pythonw.exe"

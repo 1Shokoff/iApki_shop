@@ -27,7 +27,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from app import backup  # noqa: E402
 
-HOST = "iapki-backup@iapki.sytes.net"
+HOST = "iapki-backup@iapki.ddns.net"
 KEY = Path.home() / ".ssh" / "iapki_backup"
 FOLDER = Path("D:/Backups/iApki")
 
@@ -90,7 +90,9 @@ def main() -> int:
     except Exception as exc:  # журнал — единственное, что увидит владелец; пишем любую причину
         line = "ОШИБКА: %s" % exc
         code = 1
-    with open(args.dir / "pull.log", "a", encoding="utf-8") as log:
+    # С BOM: иначе PowerShell 5.1 (Get-Content) читает журнал в ANSI и показывает кракозябры.
+    # BOM пишется только в новый файл — при дописывании Python его не повторяет.
+    with open(args.dir / "pull.log", "a", encoding="utf-8-sig") as log:
         log.write("%s  %s\n" % (stamp, line))
     print(line)
     return code

@@ -240,7 +240,7 @@ git pull && docker compose up -d --build
    Ключ API показывается полностью один раз, сразу после «Сгенерировать».
 2. `docker compose up -d --build`. В логе: «Platega подключена».
 3. В кабинете Platega, поле Callback URL: `https://<домен>/api/platega/callback`
-   (сейчас `https://iapki.sytes.net/api/platega/callback`) → «Сохранить».
+   (сейчас `https://iapki.ddns.net/api/platega/callback`) → «Сохранить».
 
 Как идёт оплата. На экране оплаты (бот и Mini App) — сумма с акцией и
 промокодом и кнопка «💳 Оплатить». По нажатию сервер создаёт транзакцию
